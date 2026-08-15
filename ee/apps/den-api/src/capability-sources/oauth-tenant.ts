@@ -1,12 +1,15 @@
 const ENTRA_TENANT_GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const ENTRA_VERIFIED_DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i
-const RESERVED_ENTRA_AUTHORITIES = new Set(["common", "organizations", "consumers"])
+const RESERVED_ENTRA_AUTHORITIES = new Set(["common", "organizations"])
+const PERSONAL_MICROSOFT_AUTHORITIES = new Set(["consumers"])
 
 export function normalizeEntraTenantId(value: unknown): string | null {
   if (typeof value !== "string") return null
   const normalized = value.trim().toLowerCase()
   if (!normalized) return null
   if (RESERVED_ENTRA_AUTHORITIES.has(normalized)) return null
+  // Allow "consumers" for personal Microsoft accounts (Hotmail, Outlook.com, Live.com)
+  if (PERSONAL_MICROSOFT_AUTHORITIES.has(normalized)) return normalized
   if (ENTRA_TENANT_GUID.test(normalized) || ENTRA_VERIFIED_DOMAIN.test(normalized)) {
     return normalized
   }

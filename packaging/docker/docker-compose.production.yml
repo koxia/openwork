@@ -1,0 +1,24 @@
+# docker-compose.production.yml - Production overlay with Caddy reverse proxy
+# Usage: docker compose -f packaging/docker/docker-compose.den-dev.yml -f packaging/docker/docker-compose.production.yml up -d
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    volumes:
+      - ../Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - den
+      - web
+    networks:
+      - default
+
+volumes:
+  caddy_data:
+  caddy_config:

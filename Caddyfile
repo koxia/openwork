@@ -1,0 +1,16 @@
+# Caddyfile for OpenWork - daviddai.click
+
+# Main web UI
+app.daviddai.click {
+    reverse_proxy web:3005
+}
+
+# API endpoint
+api.daviddai.click {
+    reverse_proxy den:8788
+}
+
+# Redirect root to app
+daviddai.click {
+    redir https://app.daviddai.click{uri}
+}

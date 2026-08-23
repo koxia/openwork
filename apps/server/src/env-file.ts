@@ -25,6 +25,10 @@ const PERSISTABLE_INTERNAL_KEYS = new Set([
   "OPENWORK_MODELS_API_KEY",
   "OPENWORK_INFERENCE_BASE_URL",
   "OPENWORK_MODELS_BASE_URL",
+  // OpenCode Go uses this as its managed provider credential. It remains
+  // excluded from process injection below; managed-provider-auth delivers it
+  // directly to the engine instead.
+  "OPENCODE_API_KEY",
 ]);
 
 export type EnvRecord = {

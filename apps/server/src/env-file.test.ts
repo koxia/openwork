@@ -118,6 +118,14 @@ describe("env-file", () => {
     expect(await EnvService.readForInjection(path)).toEqual({ ANTHROPIC_API_KEY: "sk-ant" });
   });
 
+  test("upsertMany accepts the managed OpenCode Go key but does not inject it", async () => {
+    const svc = new EnvService({ path });
+    await svc.upsertMany([{ key: "OPENCODE_API_KEY", value: "managed-key" }]);
+
+    expect((await svc.list()).map((entry) => entry.key)).toEqual(["OPENCODE_API_KEY"]);
+    expect(await EnvService.readForInjection(path)).toEqual({});
+  });
+
   test("delete returns false when the key is missing", async () => {
     const svc = new EnvService({ path });
     await svc.upsertMany([{ key: "FOO", value: "x" }]);

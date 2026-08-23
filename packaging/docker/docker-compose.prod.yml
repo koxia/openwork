@@ -117,8 +117,6 @@ services:
     depends_on:
       den:
         condition: service_healthy
-    ports:
-      - "${DEN_WEB_PORT:-3005}:3005"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3005/api/health').then((res)=>process.exit(res.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
@@ -147,6 +145,7 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+      - "3005:3005"
     volumes:
       - ../../Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

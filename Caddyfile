@@ -2,6 +2,27 @@
 
 # Main web UI
 app.daviddai.click {
+    @automation_runner path /api/den/v1/automation-runner/* /api/den/v1/automation-runners/* /api/den/v1/automation-runs/*
+    handle @automation_runner {
+        uri strip_prefix /api/den
+        reverse_proxy den:8788 {
+            header_up X-Forwarded-Prefix /api/den
+            header_up X-Forwarded-Proto https
+        }
+    }
+    reverse_proxy web:3005
+}
+
+# Web UI on alternate HTTPS port
+app.daviddai.click:3005 {
+    @automation_runner path /api/den/v1/automation-runner/* /api/den/v1/automation-runners/* /api/den/v1/automation-runs/*
+    handle @automation_runner {
+        uri strip_prefix /api/den
+        reverse_proxy den:8788 {
+            header_up X-Forwarded-Prefix /api/den
+            header_up X-Forwarded-Proto https
+        }
+    }
     reverse_proxy web:3005
 }
 

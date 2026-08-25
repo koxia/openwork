@@ -1,20 +1,8 @@
-# Caddyfile for OpenWork - daviddai.click
+# Caddyfile for OpenWork - daviddai.click (HTTPS on port 2083)
 
 # Main web UI
-app.daviddai.click {
-    @automation_runner path /api/den/v1/automation-runner/* /api/den/v1/automation-runners/* /api/den/v1/automation-runs/*
-    handle @automation_runner {
-        uri strip_prefix /api/den
-        reverse_proxy den:8788 {
-            header_up X-Forwarded-Prefix /api/den
-            header_up X-Forwarded-Proto https
-        }
-    }
-    reverse_proxy web:3005
-}
-
-# Web UI on alternate HTTPS port
-app.daviddai.click:3005 {
+app.daviddai.click:2083 {
+    tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin-key.pem
     @automation_runner path /api/den/v1/automation-runner/* /api/den/v1/automation-runners/* /api/den/v1/automation-runs/*
     handle @automation_runner {
         uri strip_prefix /api/den
@@ -27,11 +15,13 @@ app.daviddai.click:3005 {
 }
 
 # API endpoint
-api.daviddai.click {
+api.daviddai.click:2083 {
+    tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin-key.pem
     reverse_proxy den:8788
 }
 
 # Redirect root to app
-daviddai.click {
-    redir https://app.daviddai.click{uri}
+daviddai.click:2083 {
+    tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin-key.pem
+    redir https://app.daviddai.click:2083{uri}
 }

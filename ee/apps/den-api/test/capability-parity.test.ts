@@ -23,6 +23,7 @@ function seedRequiredEnv() {
 }
 
 let CAPABILITY_SOURCE_KINDS: typeof import("../src/mcp/capability-registry.js")["CAPABILITY_SOURCE_KINDS"]
+let catalogOperationAvailableToCapabilities: typeof import("../src/mcp/capability-registry.js")["catalogOperationAvailableToCapabilities"]
 let createCapabilityRegistry: typeof import("../src/mcp/capability-registry.js")["createCapabilityRegistry"]
 let codemodeScriptPath: typeof import("../src/mcp/codemode-namespaces.js")["codemodeScriptPath"]
 
@@ -30,6 +31,7 @@ beforeAll(async () => {
   seedRequiredEnv()
   const capabilityRegistry = await import("../src/mcp/capability-registry.js")
   CAPABILITY_SOURCE_KINDS = capabilityRegistry.CAPABILITY_SOURCE_KINDS
+  catalogOperationAvailableToCapabilities = capabilityRegistry.catalogOperationAvailableToCapabilities
   createCapabilityRegistry = capabilityRegistry.createCapabilityRegistry
   codemodeScriptPath = (await import("../src/mcp/codemode-namespaces.js")).codemodeScriptPath
 })
@@ -40,6 +42,7 @@ const FIXTURES: Record<CapabilitySourceKind, { capabilityName: string; namespace
   externalMcp: { capabilityName: "mcp:fixture:externalAction", namespace: "external_fixture", toolName: "externalAction" },
   marketplace: { capabilityName: "plugin:fixture:content", namespace: "marketplace", toolName: "plugin:fixture:content" },
   builtinSkill: { capabilityName: "skill:fixture", namespace: "skills", toolName: "skill:fixture" },
+  remoteSession: { capabilityName: "remote-session:create", namespace: "remote_session", toolName: "create" },
   admin: { capabilityName: "admin:fixtureAction", namespace: "admin", toolName: "fixtureAction" },
 }
 
@@ -98,6 +101,7 @@ function parsedCapability(kind: CapabilitySourceKind, name: string): ParsedCapab
   if (kind === "externalMcp") return { kind, name, connectionId: "fixture", toolName: "externalAction" }
   if (kind === "marketplace") return { kind, name, pluginId: "fixture", configObjectId: "content" }
   if (kind === "builtinSkill") return { kind, name }
+  if (kind === "remoteSession") return { kind, name, action: "create" }
   return { kind, name, toolName: "fixtureAction" }
 }
 
@@ -121,6 +125,7 @@ function fixtureSources(): Record<CapabilitySourceKind, CapabilitySource> {
     externalMcp: fixtureSource("externalMcp"),
     marketplace: fixtureSource("marketplace"),
     builtinSkill: fixtureSource("builtinSkill"),
+    remoteSession: fixtureSource("remoteSession"),
     admin: fixtureSource("admin"),
   }
 }
@@ -142,8 +147,9 @@ function fixtureContext(platformAdmin: boolean): CapabilityRegistryContext {
     organizationId,
     member: { orgMembershipId: memberId, teamIds: [] },
     redirectUriBase: "http://127.0.0.1:8790",
-    codemodeEnabled: true,
+    generatedArtifactViewsEnabled: false,
     externalMcpConnectionsEnabled: true,
+    remoteSessionsEnabled: true,
     resolvePlatformAdmin: () => {
       platformAdminResolution ??= Promise.resolve(platformAdmin)
       return platformAdminResolution
@@ -209,4 +215,21 @@ test("a non-admin member has zero admin capabilities in search, execute, and the
 
   const executed = await result.registry.execute(result.context, { name: FIXTURES.admin.capabilityName })
   expect(firstText(executed)).toContain("unknown_capability")
+})
+
+test("keeps installation and disabled generated-view operations out of every generic capability consumer", () => {
+  const disabled = { generatedArtifactViewsEnabled: false }
+  expect(catalogOperationAvailableToCapabilities(disabled, { method: "POST", path: "/v1/remote-mcp-apps" })).toBe(false)
+  expect(catalogOperationAvailableToCapabilities(disabled, { method: "GET", path: "/v1/remote-mcp-apps/{appId}" })).toBe(false)
+  expect(catalogOperationAvailableToCapabilities({ generatedArtifactViewsEnabled: true }, {
+    method: "POST",
+    path: "/v1/remote-mcp-apps/{appId}/activate",
+  })).toBe(false)
+  expect(catalogOperationAvailableToCapabilities(disabled, { method: "POST", path: "/v1/artifact-views/{artifactViewId}/retire" })).toBe(false)
+  expect(catalogOperationAvailableToCapabilities(disabled, { method: "GET", path: "/v1/workflows/{configObjectId}/views" })).toBe(false)
+  expect(catalogOperationAvailableToCapabilities(disabled, { method: "GET", path: "/v1/workflows/{configObjectId}" })).toBe(true)
+  expect(catalogOperationAvailableToCapabilities({ generatedArtifactViewsEnabled: true }, {
+    method: "POST",
+    path: "/v1/artifact-views/{artifactViewId}/retire",
+  })).toBe(true)
 })

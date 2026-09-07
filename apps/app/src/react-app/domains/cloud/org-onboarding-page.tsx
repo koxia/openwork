@@ -138,7 +138,11 @@ async function stageOnboardingUpdate(
   if (
     channelState.channel === "alpha" &&
     update.latestVersion &&
-    !(await isAlphaUpdateAllowed(update.latestVersion, desktopConfig))
+    !(await isAlphaUpdateAllowed(
+      update.latestVersion,
+      desktopConfig,
+      channelState.currentVersion,
+    ))
   ) {
     return false;
   }
@@ -239,7 +243,6 @@ function PreparedWorkspacePage({ prepared }: { prepared: PreparedBootstrapSummar
     try {
       const result = await exchangeHandoffAndSignIn(grant, {
         baseUrl: settings.baseUrl,
-        client: createDenClient({ baseUrl: settings.baseUrl }),
         // A pasted one-time code is a desktop-initiated sign-in.
         desktopInitiated: true,
       });
@@ -913,7 +916,7 @@ export function ResourceSelectionPage({ autoContinue = false }: { autoContinue?:
                   {marketplaces.length > 0 ? (
                     <Section
                       icon={<Square3Stack3DIcon className="size-5 text-foreground/60" />}
-                      title="Marketplaces"
+                      title="Collections"
                       description="App stores with extensions and plugins for your workspace."
                       count={`${marketplaces.length} marketplace${marketplaces.length === 1 ? "" : "s"}`}
                     >
@@ -940,7 +943,7 @@ export function ResourceSelectionPage({ autoContinue = false }: { autoContinue?:
           {/* Footer hint */}
           {!loading && hasResources ? (
             <p className="text-center text-xs text-muted-foreground text-balance leading-relaxed tracking-wide">
-              Providers are added to your workspace automatically. Marketplaces are available from Cloud settings.
+              Providers are added to your workspace automatically. Collections are available from Cloud settings.
             </p>
           ) : null}
           <Button

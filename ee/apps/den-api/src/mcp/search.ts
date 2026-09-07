@@ -1,4 +1,4 @@
-import { getJsonRequestBodySchema, getParameters, hasJsonRequestBody, pathParameterNamesFromTemplate, type McpToolOperation } from "./catalog.js"
+import { getJsonRequestBodySchema, getParameters, getQueryParameterSchema, hasJsonRequestBody, pathParameterNamesFromTemplate, type McpToolOperation } from "./catalog.js"
 
 /**
  * `search_capabilities` is the "search" half of a search+execute facade laid
@@ -17,6 +17,7 @@ import { getJsonRequestBodySchema, getParameters, hasJsonRequestBody, pathParame
  */
 
 export const SEARCH_CAPABILITIES_TOOL_NAME = "search_capabilities"
+export const EXECUTE_CAPABILITY_TOOL_NAME = "execute_capability"
 export type SearchCapabilityType = "all" | "api" | "admin" | "mcp" | "marketplace" | "skills"
 
 export type CapabilityMatch = {
@@ -33,6 +34,8 @@ export type CapabilityMatch = {
   hasBody: boolean
   /** Exact OpenAPI JSON schema for `body`, present only for JSON mutations. */
   bodySchema?: unknown
+  /** Exact OpenAPI JSON schema for the query string parameters, present only when the operation documents any. */
+  querySchema?: unknown
   /** Exact MCP arguments schema returned by a live MCP tool list. */
   argumentsSchema?: unknown
   /** Tells generic execute callers where MCP arguments must be supplied. */
@@ -41,6 +44,8 @@ export type CapabilityMatch = {
   scriptPath?: string
   /** Callable capability or a source-specific advisory/content kind. */
   kind?: string
+  /** Standard MCP App binding advertised by the matched provider tool. */
+  mcpApp?: { resourceUri: string }
 }
 
 export function compareCapabilityMatches(a: CapabilityMatch, b: CapabilityMatch): number {
@@ -124,19 +129,22 @@ export function searchCapabilities(
   const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 5))
 
   return catalog
-    .map((operation) => ({
-      name: operation.name,
-      method: operation.method,
-      path: operation.path,
-      score: scoreOperation(operation, queryTokens),
-      summary: summaryFor(operation),
-      pathParams: pathParameterNamesFromTemplate(operation.path),
-      queryParams: getParameters(operation.operation, "query").map((parameter) => parameter.name as string),
-      hasBody: hasJsonRequestBody(operation.operation),
-      ...(getJsonRequestBodySchema(operation.operation) === undefined
-        ? {}
-        : { bodySchema: getJsonRequestBodySchema(operation.operation) }),
-    }))
+    .map((operation) => {
+      const bodySchema = getJsonRequestBodySchema(operation.operation)
+      const querySchema = getQueryParameterSchema(operation.operation)
+      return {
+        name: operation.name,
+        method: operation.method,
+        path: operation.path,
+        score: scoreOperation(operation, queryTokens),
+        summary: summaryFor(operation),
+        pathParams: pathParameterNamesFromTemplate(operation.path),
+        queryParams: getParameters(operation.operation, "query").map((parameter) => parameter.name as string),
+        hasBody: hasJsonRequestBody(operation.operation),
+        ...(bodySchema === undefined ? {} : { bodySchema }),
+        ...(querySchema === undefined ? {} : { querySchema }),
+      }
+    })
     .filter((match) => match.score > 0)
     .sort(compareCapabilityMatches)
     .slice(0, boundedLimit)

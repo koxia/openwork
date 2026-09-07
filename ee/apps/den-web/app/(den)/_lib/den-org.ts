@@ -161,13 +161,17 @@ export type DenOrgSsoConnection = {
   kind: "oidc" | "saml";
   issuer: string;
   domain: string;
-  status: string;
+  status: "disabled" | "enabled";
+  testStatus: "untested" | "testing" | "succeeded" | "failed";
+  testExpiresAt: string | null;
   signInPath: string;
   signInUrl: string;
   redirectUrl: string;
   acsUrl: string | null;
   metadataUrl: string | null;
   domainVerified: boolean;
+  domainVerificationHost: string;
+  domainVerificationDnsName: string;
   oidc: {
     clientId: string | null;
     scopes: string[];
@@ -236,11 +240,15 @@ export type DenOrgEntitlements = {
   analytics: boolean;
 };
 
-/** Per-org feature flags controlled by platform admins; everything defaults to off. */
+/** Server-advertised and per-org capabilities; optional fields default to off. */
 export type DenOrgCapabilities = {
+  orgManagedDashboards: boolean;
   installLinks: boolean;
   mcpConnections: boolean;
-  codemodeScripts: boolean;
+  /** Always on: Workflows/Code Mode shipped for every organization. Older servers may still return false. */
+  workflows: boolean;
+  /** Effective Web offer; true for the global switch or this organization's complimentary admin grant. */
+  openworkWeb: boolean;
   cloud: boolean;
 };
 
@@ -279,7 +287,6 @@ export const DEN_ROLE_PERMISSION_OPTIONS = {
 
 export const PENDING_ORG_INVITATION_STORAGE_KEY = "openwork:web:pending-org-invitation";
 export const PENDING_WORKSPACE_CLAIM_STORAGE_KEY = "openwork:web:pending-workspace-claim";
-export const PENDING_ORG_SELECTION_STORAGE_KEY = "openwork:web:pending-org-selection";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -476,14 +483,6 @@ export function getOrgAccessFlags(roleValue: string, isOwner: boolean, _roleDefi
   };
 }
 
-export function shouldRequireOrgSelection(orgs: readonly DenOrgSummary[]): boolean {
-  return orgs.length > 1 && !orgs.some((org) => org.isActive);
-}
-
-export function shouldOfferOrgSelection(orgs: readonly DenOrgSummary[]): boolean {
-  return orgs.length > 1;
-}
-
 export function formatRoleLabel(role: string): string {
   return role
     .split(/[-_\s]+/)
@@ -500,6 +499,14 @@ export function getMarketplaceOnboardingRoute(_orgSlug?: string | null): string 
   return `${getOrgDashboardRoute(_orgSlug)}/onboarding`;
 }
 
+export function getOnboardingToolsRoute(orgSlug?: string | null): string {
+  return `${getMarketplaceOnboardingRoute(orgSlug)}/tools`;
+}
+
+export function getOnboardingPeopleRoute(orgSlug?: string | null): string {
+  return `${getMarketplaceOnboardingRoute(orgSlug)}/people`;
+}
+
 export function getJoinOrgRoute(invitationId: string): string {
   return `/join-org?invite=${encodeURIComponent(invitationId)}`;
 }
@@ -510,6 +517,10 @@ export function getWorkspaceClaimRoute(token: string): string {
 
 export function getAnalyticsRoute(orgSlug?: string | null): string {
   return `${getOrgDashboardRoute(orgSlug)}/analytics`;
+}
+
+export function getModelsAnalyticsRoute(orgSlug?: string | null): string {
+  return `${getAnalyticsRoute(orgSlug)}/models`;
 }
 
 export function getManageMembersRoute(orgSlug?: string | null): string {
@@ -528,8 +539,8 @@ export function getBackgroundAgentsRoute(orgSlug?: string | null): string {
   return `${getOrgDashboardRoute(orgSlug)}/background-agents`;
 }
 
-export function getScriptRunsRoute(orgSlug?: string | null): string {
-  return `${getOrgDashboardRoute(orgSlug)}/script-runs`;
+export function getWorkflowRunsRoute(orgSlug?: string | null): string {
+  return `${getAnalyticsRoute(orgSlug)}/workflow-runs`;
 }
 
 export function getAutomationsRoute(orgSlug?: string | null): string {
@@ -550,6 +561,14 @@ export function getWebRoute(orgSlug?: string | null): string {
 
 export function getLlmProvidersRoute(orgSlug?: string | null): string {
   return getCustomLlmProvidersRoute(orgSlug);
+}
+
+export function getManagedDashboardsRoute(orgSlug?: string | null): string {
+  return `${getOrgDashboardRoute(orgSlug)}/dashboards`;
+}
+
+export function getManagedDashboardRoute(orgSlug: string | null | undefined, dashboardId: string): string {
+  return `${getManagedDashboardsRoute(orgSlug)}/${encodeURIComponent(dashboardId)}`;
 }
 
 export function getDesktopPoliciesRoute(orgSlug?: string | null): string {
@@ -644,6 +663,10 @@ export function getIntegrationsRoute(orgSlug?: string | null): string {
   return `${getOrgDashboardRoute(orgSlug)}/integrations`;
 }
 
+export function getPluginSourcesRoute(orgSlug?: string | null): string {
+  return `${getPluginsRoute(orgSlug)}?view=sources`;
+}
+
 export function getGithubIntegrationRoute(orgSlug?: string | null): string {
   return `${getIntegrationsRoute(orgSlug)}/github`;
 }
@@ -662,6 +685,10 @@ export function getToolTesterRoute(orgSlug?: string | null): string {
 
 export function getLibraryRoute(orgSlug?: string | null): string {
   return `${getOrgDashboardRoute(orgSlug)}/library`;
+}
+
+export function getLibraryPluginRoute(orgSlug: string | null | undefined, pluginId: string): string {
+  return `${getLibraryRoute(orgSlug)}/plugins/${encodeURIComponent(pluginId)}`;
 }
 
 export function getGithubIntegrationSetupRoute(orgSlug: string | null | undefined, connectorInstanceId: string): string {
@@ -932,13 +959,17 @@ function parseOrgAuthMethods(value: unknown): DenOrgAuthMethods {
 
 function parseOrgCapabilities(value: unknown): DenOrgCapabilities {
   if (!isRecord(value)) {
-    return { installLinks: false, mcpConnections: false, codemodeScripts: false, cloud: false };
+    return { orgManagedDashboards: false, installLinks: false, mcpConnections: false, workflows: true, openworkWeb: false, cloud: false };
   }
 
   return {
+    orgManagedDashboards: value.orgManagedDashboards === true,
     installLinks: value.installLinks === true,
     mcpConnections: value.mcpConnections === true,
-    codemodeScripts: value.codemodeScripts === true,
+    // Workflows are enabled everywhere on current servers; only an explicit
+    // false from an older server still hides the surface.
+    workflows: value.workflows !== false,
+    openworkWeb: value.openworkWeb === true,
     cloud: value.cloud === true,
   };
 }
@@ -1151,14 +1182,17 @@ export function parseOrgSsoPayload(payload: unknown): {
         const issuer = asString(rawConnection.issuer);
         const domain = asString(rawConnection.domain);
         const status = asString(rawConnection.status);
+        const testStatus = asString(rawConnection.testStatus);
         const signInPath = asString(rawConnection.signInPath);
         const signInUrl = asString(rawConnection.signInUrl);
         const redirectUrl = asString(rawConnection.redirectUrl);
+        const domainVerificationHost = asString(rawConnection.domainVerificationHost);
+        const domainVerificationDnsName = asString(rawConnection.domainVerificationDnsName);
         const rawOidc = isRecord(rawConnection.oidc) ? rawConnection.oidc : null;
         const rawSaml = isRecord(rawConnection.saml) ? rawConnection.saml : null;
         const tokenEndpointAuthentication = asString(rawOidc?.tokenEndpointAuthentication);
 
-        if (!id || !providerId || !issuer || !domain || !status || !signInPath || !signInUrl || !redirectUrl || (kind !== "oidc" && kind !== "saml")) {
+        if (!id || !providerId || !issuer || !domain || (status !== "disabled" && status !== "enabled") || (testStatus !== "untested" && testStatus !== "testing" && testStatus !== "succeeded" && testStatus !== "failed") || !signInPath || !signInUrl || !redirectUrl || !domainVerificationHost || !domainVerificationDnsName || (kind !== "oidc" && kind !== "saml")) {
           return null;
         }
 
@@ -1169,12 +1203,16 @@ export function parseOrgSsoPayload(payload: unknown): {
           issuer,
           domain,
           status,
+          testStatus,
+          testExpiresAt: asIsoString(rawConnection.testExpiresAt),
           signInPath,
           signInUrl,
           redirectUrl,
           acsUrl: asString(rawConnection.acsUrl),
           metadataUrl: asString(rawConnection.metadataUrl),
           domainVerified: asBoolean(rawConnection.domainVerified),
+          domainVerificationHost,
+          domainVerificationDnsName,
           oidc: rawOidc
             ? {
                 clientId: asString(rawOidc.clientId),

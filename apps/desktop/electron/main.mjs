@@ -1,3 +1,4 @@
+import { processBlankSlateProfile, resolveBlankSlateLaunch } from "./blank-slate-profile.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import net from "node:net";
@@ -20,7 +21,7 @@ import { globalOpencodeConfigDir, workspaceOpencodeConfigCandidates } from "@ope
 
 import { configureFakeMediaForTests, installMediaPermissionHandlers } from "./media-permissions.mjs";
 import { registerMigrationIpc } from "./migration.mjs";
-import { createRuntimeManager } from "./runtime.mjs";
+import { createRuntimeManager, createSystemCaCertificateVerifyProc } from "./runtime.mjs";
 import { registerUpdaterIpc } from "./updater.mjs";
 import {
   checkComputerUsePermissions,
@@ -31,6 +32,7 @@ import {
 import { createUiControlServer } from "./ui-control-server.mjs";
 import { createApplicationMenu } from "./app-menu.mjs";
 import { applyBrandAppName } from "./brand-app-name.mjs";
+import { createBrowserLoginSync } from "./browser-login-sync.mjs";
 import { createBrowserPanel } from "./browser-panel.mjs";
 import { createWorkspaceStore } from "./workspace-store.mjs";
 import {
@@ -52,6 +54,7 @@ import { resolveConnectLinkPublicKeys } from "./connect-link-keys.mjs";
 import { openExternalUrl } from "./open-external.mjs";
 import { resolveAppIdentifier, resolveUserDataPath } from "./dev-profile.mjs";
 import { fetchAgentContextDiagnosticsResponse } from "./agent-context-diagnostics-fetch.mjs";
+import { downloadBinaryToPath, uploadMultipartFromBytes } from "./binary-transfer.mjs";
 import {
   createLinuxDesktopIntegration,
 } from "./linux-desktop-integration.mjs";
@@ -73,6 +76,17 @@ import {
 } from "./brand-icon-windows.mjs";
 import { resetMacDockIcon } from "./brand-icon-darwin.mjs";
 import { createDesktopVaultKeyProvider } from "./secure-vault-key.mjs";
+import {
+  clearOpenworkSentrySession,
+  initOpenworkSentry,
+  setOpenworkSentrySession,
+} from "./sentry.mjs";
+import { installStdioErrorHandlers } from "./stdio-errors.mjs";
+import {
+  createRendererCrashRecovery,
+  installSocketTypeOfServiceGuard,
+  runDetachedTask,
+} from "./process-resilience.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(__dirname, "../../..");
@@ -89,6 +103,7 @@ const {
   nativeImage,
   nativeTheme,
   net: electronNet,
+  powerMonitor,
   Notification: ElectronNotification,
   session,
   shell,
@@ -96,6 +111,7 @@ const {
 } = require("electron");
 const pty = require(["node", "pty"].join("-"));
 const NATIVE_DEEP_LINK_EVENT = "openwork:deep-link-native";
+const AUTOMATION_RUNNER_CREDENTIAL_REJECTED_EVENT = "openwork:automation-runner:credential-rejected";
 const isDevMode = process.env.OPENWORK_DEV_MODE === "1";
 const DESKTOP_DISTRIBUTION = resolveDesktopDistribution({
   isPackaged: app.isPackaged,
@@ -105,10 +121,22 @@ const DESKTOP_DISTRIBUTION = resolveDesktopDistribution({
 const TAURI_APP_IDENTIFIER = DESKTOP_DISTRIBUTION.appIdentifier;
 const DEV_APP_IDENTIFIER = `${DESKTOP_DISTRIBUTION.appIdentifier}.dev`;
 const DESKTOP_PROTOCOL_SCHEME = DESKTOP_DISTRIBUTION.protocolScheme;
-const APP_NAME =
+const DEFAULT_APP_NAME =
   (!app.isPackaged ? process.env.OPENWORK_ELECTRON_APP_NAME?.trim() : "") ||
   (isDevMode ? `${DESKTOP_DISTRIBUTION.appName} - Dev` : DESKTOP_DISTRIBUTION.appName);
+const BLANK_SLATE_LAUNCH = resolveBlankSlateLaunch({
+  appName: DEFAULT_APP_NAME,
+  profile: processBlankSlateProfile,
+});
+const APP_NAME = BLANK_SLATE_LAUNCH.appName;
 let currentDisplayAppName = APP_NAME;
+installStdioErrorHandlers();
+installSocketTypeOfServiceGuard();
+await initOpenworkSentry({
+  app,
+  distribution: DESKTOP_DISTRIBUTION,
+  packageMetadata: desktopPackageMetadata,
+});
 const BASE_APP_IDENTIFIER = isDevMode ? DEV_APP_IDENTIFIER : TAURI_APP_IDENTIFIER;
 const APP_IDENTIFIER = resolveAppIdentifier({
   appIdentifierOverride: process.env.OPENWORK_ELECTRON_APP_IDENTIFIER,
@@ -119,7 +147,7 @@ const APP_IDENTIFIER = resolveAppIdentifier({
   isDevMode,
   isPackaged: app.isPackaged,
 });
-if (process.env.OPENWORK_ELECTRON_USE_MOCK_KEYCHAIN === "1") {
+if (BLANK_SLATE_LAUNCH.enabled || process.env.OPENWORK_ELECTRON_USE_MOCK_KEYCHAIN === "1") {
   // Fresh, isolated development profiles otherwise trigger macOS's native
   // "Login" keychain prompt as soon as Chromium persists an authenticated
   // cookie. That modal blocks the entire Electron main loop and makes the demo
@@ -137,6 +165,7 @@ const applicationMenu = createApplicationMenu({
 });
 
 const uiControlServer = createUiControlServer({
+  app,
   appName: APP_NAME,
   appIdentifier: APP_IDENTIFIER,
   getWindow: () => createMainWindow(),
@@ -186,14 +215,16 @@ function killTerminalsForWebContents(webContentsId) {
 // OPENWORK_DEV_PROFILE in unpackaged dev; then the legacy identifier default.
 app.setName(APP_NAME);
 app.setAppUserModelId(APP_IDENTIFIER);
+if (BLANK_SLATE_LAUNCH.homePath) app.setPath("home", BLANK_SLATE_LAUNCH.homePath);
 if (
   app.isPackaged
+  && !BLANK_SLATE_LAUNCH.enabled
   && process.env.OPENWORK_ELECTRON_DISABLE_PROTOCOL_REGISTRATION !== "1"
   && !(process.platform === "linux" && process.env.APPIMAGE)
 ) {
   app.setAsDefaultProtocolClient(DESKTOP_PROTOCOL_SCHEME);
 }
-const userDataPath = resolveUserDataPath({
+const userDataPath = BLANK_SLATE_LAUNCH.userDataPath ?? resolveUserDataPath({
   appDataPath: app.getPath("appData"),
   appIdentifier: APP_IDENTIFIER,
   userDataOverride: process.env.OPENWORK_ELECTRON_USERDATA,
@@ -372,6 +403,28 @@ const BRAND_ICON_FETCH_TIMEOUT_MS = 10_000;
 // Keep in sync with ee/apps/den-api/src/brand-icon-validation.ts so logo CDNs
 // that expect a browser request behave the same at save time and apply time.
 const BRAND_ICON_FETCH_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+function scheduleBlankSlateProfileCleanup() {
+  if (!BLANK_SLATE_LAUNCH.rootPath) return;
+  try {
+    const child = spawn(process.execPath, [
+      path.join(__dirname, "blank-slate-cleanup.mjs"),
+      String(process.pid),
+      BLANK_SLATE_LAUNCH.rootPath,
+    ], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    });
+    child.once("error", (error) => {
+      console.warn("[blank-slate] failed to schedule temporary profile cleanup", error);
+    });
+    child.unref();
+  } catch (error) {
+    console.warn("[blank-slate] failed to schedule temporary profile cleanup", error);
+  }
+}
 let brandIconApplySequence = 0;
 let brandIconRuntimeState = { applied: false, sourceUrl: null, reason: null };
 
@@ -638,7 +691,7 @@ function showDesktopNotification(input) {
   try {
     const notification = new ElectronNotification(options);
     notification.on("click", () => {
-      void focusMainWindowFromNotification();
+      runDetachedTask("focus window from notification", focusMainWindowFromNotification);
     });
     notification.show();
     return { ok: true };
@@ -986,6 +1039,7 @@ const IDLE_OPENWORK_SERVER_INFO = Object.freeze({
   hostToken: null,
   managedOpencodeBinPath: null,
   managedOpencodeBinSource: null,
+  logFilePath: null,
   pid: null,
   lastStdout: null,
   lastStderr: null,
@@ -1009,6 +1063,17 @@ const browserPanel = createBrowserPanel({
   remoteDebugPort,
   getWindow: () => mainWindow,
   onDeepLink: (urls) => queueDeepLinks(urls),
+  checkPolicy: async (input) => {
+    const server = await runtimeManager.openworkServerInfo();
+    if (!server.baseUrl || !(server.clientToken ?? server.ownerToken)) throw new Error("OpenWork policy service is unavailable.");
+    // loopback-fetch: the policy service is the locally managed OpenWork server.
+    const response = await fetch(`${server.baseUrl}/managed-policy/evaluate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${server.clientToken ?? server.ownerToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: input.external ? "browser_external" : "browser", input }), signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error("Your organization's policy blocked this browser request.");
+  },
 });
 
 const workspaceStore = createWorkspaceStore({
@@ -1017,6 +1082,45 @@ const workspaceStore = createWorkspaceStore({
   defaultRequireSignin: DEFAULT_DESKTOP_REQUIRE_SIGNIN,
   forceRequireSignin: FORCE_DESKTOP_REQUIRE_SIGNIN,
 });
+
+const activeDesktopTransfers = new Map();
+
+function desktopTransferKey(event, transferId) {
+  const normalizedId = typeof transferId === "string" ? transferId.trim() : "";
+  if (!normalizedId || normalizedId.length > 128 || !/^[a-zA-Z0-9._-]+$/.test(normalizedId)) {
+    throw new Error("A valid transferId is required.");
+  }
+  return `${event.sender.id}:${normalizedId}`;
+}
+
+async function runDesktopTransfer(event, input, operation) {
+  const key = desktopTransferKey(event, input?.transferId);
+  if (activeDesktopTransfers.has(key)) throw new Error("transferId is already active.");
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  activeDesktopTransfers.set(key, controller);
+  event.sender.once("destroyed", abort);
+  try {
+    // Both authorities come from app-owned state in userData; workspace-
+    // writable configuration must never widen where a transfer may write.
+    const [authorizedRoots, allowedUrlPrefixes] = await Promise.all([
+      workspaceStore.listLocalWorkspacePaths(),
+      workspaceStore.listRemoteWorkspaceUrlPrefixes(),
+    ]);
+    return await operation(input, {
+      authorizedRoots,
+      allowedUrlPrefixes,
+      // App-owned staging keeps in-flight downloads outside every authorized
+      // workspace root until they complete.
+      stagingDir: path.join(app.getPath("userData"), "binary-transfers"),
+      fetcher: electronNet.fetch,
+      signal: controller.signal,
+    });
+  } finally {
+    event.sender.removeListener("destroyed", abort);
+    activeDesktopTransfers.delete(key);
+  }
+}
 
 const connectLinkReplayGuard = createConnectLinkReplayGuard({
   filePath: path.join(app.getPath("userData"), "connect-link-seen.json"),
@@ -1188,10 +1292,13 @@ const runtimeManager = createRuntimeManager({
   app,
   desktopRoot: path.resolve(__dirname, ".."),
   listLocalWorkspacePaths: () => workspaceStore.listLocalWorkspacePaths(),
-  localManagedMcpVaultKey: createDesktopVaultKeyProvider({
-    filePath: path.join(app.getPath("userData"), "local-managed-mcp-vault-key.bin"),
-    loadSafeStorage: () => require("electron").safeStorage,
-  }),
+  // When OPENWORK_ENCRYPTION_KEY is set, skip the safeStorage provider so it does not shadow the documented env override used by CI/headless/enterprise.
+  localManagedMcpVaultKey: process.env.OPENWORK_ENCRYPTION_KEY?.trim()
+    ? undefined
+    : createDesktopVaultKeyProvider({
+        filePath: path.join(app.getPath("userData"), "local-managed-mcp-vault-key.bin"),
+        loadSafeStorage: () => require("electron").safeStorage,
+      }),
 });
 const initialRunnerBootstrap = workspaceStore.readDesktopBootstrapConfigSync();
 const legacyRunnerBaseUrls = [
@@ -1211,7 +1318,23 @@ const desktopAutomationRunner = createDesktopAutomationRunner({
     return { baseUrl: server.baseUrl, token: server.clientToken ?? server.ownerToken };
   },
   log: (state) => console.info(`[automation-runner] ${state}`),
+  onCredentialRejected: () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send(AUTOMATION_RUNNER_CREDENTIAL_REJECTED_EVENT);
+  },
 });
+
+// Scheduled Automations are due at wall-clock times a laptop routinely sleeps
+// through. Waking the machine has to poll for work now, not up to a full poll
+// interval later, or a recovered occurrence sits queued while the desktop is
+// already back.
+const wakeAutomationRunner = (wakeEvent) => {
+  if (desktopAutomationRunner.wake().polled) {
+    console.info(`[automation-runner] polling for work after ${wakeEvent}`);
+  }
+};
+powerMonitor.on("resume", () => wakeAutomationRunner("resume"));
+powerMonitor.on("unlock-screen", () => wakeAutomationRunner("unlock-screen"));
 
 let runtimeDisposedForQuit = false;
 let runtimeDisposeInProgress = false;
@@ -1222,7 +1345,7 @@ function showShutdownScreen() {
   if (!win || win.isDestroyed()) return;
   try {
     win.show();
-    win.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html>
+    void win.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
@@ -1243,7 +1366,7 @@ function showShutdownScreen() {
       <div class="body">Closing local workers and background services...</div>
     </main>
   </body>
-</html>`)}`);
+</html>`)}`).catch(() => undefined);
   } catch {
     // Ignore renderer teardown races during quit.
   }
@@ -1733,13 +1856,27 @@ const desktopCommandHandlers = {
   "desktopNotificationShow": async (event, ...args) => {
       return showDesktopNotification(args[0] ?? {});
   },
+  "desktopSentrySetSession": async (event, ...args) => {
+      const input = args[0] ?? {};
+      return {
+        enabled: setOpenworkSentrySession({
+          userId: input.userId,
+          orgId: input.orgId,
+        }),
+      };
+  },
+  "desktopSentryClearSession": async (event, ...args) => {
+      return { enabled: clearOpenworkSentrySession() };
+  },
   "desktopIntegrationStatus": async (event, ...args) => {
       return linuxDesktopIntegration.getStatus();
   },
   "desktopIntegrationInstall": async (event, ...args) => {
+      if (BLANK_SLATE_LAUNCH.enabled) throw new Error("Desktop integration is disabled for test profiles.");
       return linuxDesktopIntegration.install(args[0] ?? {});
   },
   "desktopIntegrationRemove": async (event, ...args) => {
+      if (BLANK_SLATE_LAUNCH.enabled) throw new Error("Desktop integration is disabled for test profiles.");
       return linuxDesktopIntegration.remove();
   },
   "getUiControlBridgeInfo": async (event, ...args) => {
@@ -1760,7 +1897,7 @@ const desktopCommandHandlers = {
       return getComputerUseMcpCommand();
   },
   "checkComputerUsePermissions": async (event, ...args) => {
-      // Spawn --check → fresh TCC read → always accurate.
+      // Read permissions in the same child-process context as setup.
       return checkComputerUsePermissions();
   },
   "listRunningApps": async (event, ...args) => {
@@ -2062,7 +2199,7 @@ const desktopCommandHandlers = {
   },
   "__applyBrandAppName": async (event, ...args) => {
     currentDisplayAppName = applyBrandAppName(
-      DESKTOP_DISTRIBUTION.flavor === "enterprise" ? null : args[0],
+      BLANK_SLATE_LAUNCH.enabled || DESKTOP_DISTRIBUTION.flavor === "enterprise" ? null : args[0],
       {
       fallbackName: APP_NAME,
       platform: process.platform,
@@ -2073,12 +2210,13 @@ const desktopCommandHandlers = {
       window: mainWindow,
       },
     );
-    if (process.platform === "win32") {
+    if (process.platform === "win32" && !BLANK_SLATE_LAUNCH.enabled) {
       await registerWindowsDisplayShortcut();
     }
     return { ok: true, appName: currentDisplayAppName };
   },
   "__applyBrandIcon": async (event, ...args) => {
+      if (BLANK_SLATE_LAUNCH.enabled) return { ok: true };
       const value = args[0] === null ? null : String(args[0] ?? "");
       return applyBrandIconUrl(value);
   },
@@ -2196,6 +2334,18 @@ const desktopCommandHandlers = {
         headers: Array.from(response.headers.entries()),
         body: await response.text(),
       };
+  },
+  "__uploadMultipart": async (event, ...args) => {
+      return runDesktopTransfer(event, args[0] ?? {}, uploadMultipartFromBytes);
+  },
+  "__downloadBinary": async (event, ...args) => {
+      return runDesktopTransfer(event, args[0] ?? {}, downloadBinaryToPath);
+  },
+  "__cancelTransfer": async (event, ...args) => {
+      const controller = activeDesktopTransfers.get(desktopTransferKey(event, args[0]));
+      if (!controller) return false;
+      controller.abort();
+      return true;
   },
   "__homeDir": async (event, ...args) => {
       return os.homedir();
@@ -2393,25 +2543,42 @@ async function createMainWindow() {
     mainWindow = null;
   });
 
+  const recoverRendererCrash = createRendererCrashRecovery({
+    reload: () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.reload();
+    },
+    onRepeatedCrash: (details) => {
+      dialog.showErrorBox(
+        `${APP_NAME} could not recover`,
+        `The app renderer stopped repeatedly (${details.reason ?? "unknown reason"}). Quit and reopen OpenWork. Your workspace files were not deleted.`,
+      );
+    },
+  });
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    recoverRendererCrash(details);
+  });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("file://")) {
       try {
-        void shell.openPath(fileURLToPath(url));
+        runDetachedTask("open local file", () => shell.openPath(fileURLToPath(url)));
       } catch {
-        void openExternalUrl(url);
+        runDetachedTask("open local file externally", () => openExternalUrl(url));
       }
 
       return { action: "deny" };
     }
 
-    const local =
-      url.startsWith("http://127.0.0.1") ||
-      url.startsWith("http://localhost");
-    if (!local) {
-      void openExternalUrl(url);
-      return { action: "deny" };
+    if (/^https?:\/\//i.test(url)) {
+      // Transcript links and local previews belong in the thread's browser,
+      // never an unmanaged BrowserWindow. Explicit external/auth actions use
+      // the shell bridge and do not pass through this popup handler.
+      browserPanel.routeBlockedMainWindowNavigation(url);
+    } else {
+      runDetachedTask("open external URL", () => openExternalUrl(url));
     }
-    return { action: "allow" };
+    return { action: "deny" };
   });
 
   mainWindow.webContents.on("will-navigate", (event, url) => {
@@ -2531,6 +2698,40 @@ ipcMain.handle("openwork:terminal:kill", (event, terminalId) => {
 });
 
 browserPanel.registerIpc(ipcMain);
+const browserLoginEvalSeam = !app.isPackaged && process.env.OPENWORK_EVAL_BROWSER_LOGIN_SYNC === "1";
+const browserLoginSync = createBrowserLoginSync({
+  statePath: path.join(app.getPath("userData"), "browser-login-sync.json"),
+  initialPolicyAllowed:
+    DESKTOP_DISTRIBUTION.flavor === "public"
+    && initialRunnerBootstrap.requireSignin !== true,
+  confirmUserAction: browserLoginEvalSeam
+    ? async () => true
+    : async ({ action, source, sites = [] }) => {
+      const sourceLabel = source ? `${source.label} · ${source.profile}` : "Supported browser profiles on this computer";
+      /** @type {import("electron").MessageBoxOptions} */
+      const options = {
+        type: "warning",
+        buttons: [action === "resume" ? "Resume sync" : action === "configure" ? "Enable sync" : action === "discover" ? "Look for browsers" : "Read sites", "Cancel"],
+        defaultId: 1,
+        cancelId: 1,
+        title: action === "resume" ? "Resume browser login sync?" : action === "configure" ? "Enable browser login sync?" : action === "discover" ? "Look for browser profiles?" : "Read logins from this browser?",
+        message: sourceLabel,
+        detail: action === "resume"
+          ? "OpenWork will resume reading the sites you selected from this profile. It never changes the source browser."
+          : action === "configure"
+            ? `OpenWork will keep reading login cookies for these sites until you pause or disconnect: ${sites.join(", ")}. It never changes the source browser.`
+            : action === "discover"
+              ? "OpenWork will look only for supported browser profile locations. It will not read cookie databases until you choose a profile and confirm again."
+              : "OpenWork will read login metadata from this profile so you can choose sites. Nothing syncs until you confirm those sites, and the source browser is never changed.",
+        noLink: true,
+      };
+      const result = mainWindow
+        ? await dialog.showMessageBox(mainWindow, options)
+        : await dialog.showMessageBox(options);
+      return result.response === 0;
+    },
+});
+browserLoginSync.registerIpc(ipcMain, { evalSeam: browserLoginEvalSeam });
 
 registerMigrationIpc({ app, ipcMain });
 const { ensureAutoUpdater } = registerUpdaterIpc({
@@ -2569,31 +2770,44 @@ or use: pnpm dev:worktree`);
     if (runtimeDisposeInProgress) return;
     showShutdownScreen();
     desktopAutomationRunner.stop();
-    void Promise.all([disposeRuntimeBeforeQuit(), uiControlServer.stop()]).finally(() => app.quit());
+    browserLoginSync.shutdown();
+    runDetachedTask("stop services before quit", async () => {
+      try {
+        await Promise.all([
+          disposeRuntimeBeforeQuit(),
+          uiControlServer.stop(),
+        ]);
+      } finally {
+        scheduleBlankSlateProfileCleanup();
+        app.quit();
+      }
+    });
   });
 
-  app.on("second-instance", async (_event, argv) => {
-    const win = await createMainWindow();
-    if (win.isMinimized()) {
-      win.restore();
-    }
-    win.show();
-    win.focus();
-    queueDeepLinks(forwardedDeepLinks(argv));
+  app.on("second-instance", (_event, argv) => {
+    runDetachedTask("focus second instance", async () => {
+      const win = await createMainWindow();
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+      queueDeepLinks(forwardedDeepLinks(argv));
+    });
   });
 
-  app.on("open-url", async (event, url) => {
+  app.on("open-url", (event, url) => {
     event.preventDefault();
-    const win = await createMainWindow();
-    if (win.isMinimized()) {
-      win.restore();
-    }
-    win.show();
-    win.focus();
-    queueDeepLinks([url]);
+    runDetachedTask("open deep link", async () => {
+      const win = await createMainWindow();
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+      queueDeepLinks([url]);
+    });
   });
 
   app.whenReady().then(async () => {
+    const systemCaCertificates = await runtimeManager.systemCaCertificates();
+    session.defaultSession.setCertificateVerifyProc(createSystemCaCertificateVerifyProc(systemCaCertificates));
     installMediaPermissionHandlers(session, () => mainWindow);
     await runPendingNukeCleanup({
       env: process.env,
@@ -2603,10 +2817,9 @@ or use: pnpm dev:worktree`);
     }).catch((error) => {
       console.warn("[nuke] pending cleanup failed", error);
     });
-    await workspaceStore.importBundledDesktopBootstrapConfigIfPreferred();
     const bootstrapConfig = await workspaceStore.getDesktopBootstrapConfig();
     currentDisplayAppName = applyBrandAppName(
-      DESKTOP_DISTRIBUTION.flavor === "enterprise"
+      BLANK_SLATE_LAUNCH.enabled || DESKTOP_DISTRIBUTION.flavor === "enterprise"
         ? null
         : bootstrapConfig.brandAppName,
       {
@@ -2618,10 +2831,10 @@ or use: pnpm dev:worktree`);
       applicationMenu,
       },
     );
-    if (process.platform === "win32") {
+    if (process.platform === "win32" && !BLANK_SLATE_LAUNCH.enabled) {
       await registerWindowsDisplayShortcut();
     }
-    if (process.platform !== "linux") {
+    if (process.platform !== "linux" && !BLANK_SLATE_LAUNCH.enabled) {
       await applyDesktopBootstrapBrandIcon(bootstrapConfig, applyBrandIconUrl);
     }
     applicationMenu.install();
@@ -2650,32 +2863,39 @@ or use: pnpm dev:worktree`);
 
     queueDeepLinks(forwardedDeepLinks(process.argv));
     const win = await createMainWindow();
-    if (process.platform === "linux") {
+    if (process.platform === "linux" && !BLANK_SLATE_LAUNCH.enabled) {
       await applyDesktopBootstrapBrandIcon(bootstrapConfig, applyBrandIconUrl);
     }
     win.webContents.on("did-finish-load", () => {
       flushPendingDeepLinks();
     });
-    setTimeout(() => {
-      void linuxDesktopIntegration.maybePrompt(win).catch((error) => {
-        console.warn("[desktop-integration] prompt failed", error);
-      });
-    }, 500);
+    if (!BLANK_SLATE_LAUNCH.enabled) {
+      setTimeout(() => {
+        void linuxDesktopIntegration.maybePrompt(win).catch((error) => {
+          console.warn("[desktop-integration] prompt failed", error);
+        });
+      }, 500);
+    }
 
     // Initialize the packaged updater after the window is up so the user sees
     // a working app first. Renderer-owned checks pass the selected release
     // channel explicitly, avoiding stale stable-feed results for alpha users.
-    void ensureAutoUpdater();
+    runDetachedTask("initialize updater", ensureAutoUpdater);
+  }).catch((error) => {
+    console.error("[desktop] startup failed", error);
+    dialog.showErrorBox(
+      `${APP_NAME} could not start`,
+      "OpenWork hit an unexpected startup error. Quit and reopen the app. If it continues, switch to a Stable build and share the diagnostics with support.",
+    );
+    app.quit();
   });
 
-  app.on("activate", async () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      await createMainWindow();
-      return;
-    }
-    const win = await createMainWindow();
-    win.show();
-    win.focus();
+  app.on("activate", () => {
+    runDetachedTask("activate window", async () => {
+      const win = await createMainWindow();
+      win.show();
+      win.focus();
+    });
   });
 
   app.on("window-all-closed", () => {

@@ -53,7 +53,7 @@ type EditorProps = {
   mentions: Record<string, ComposerMentionKind>;
   pastedText?: PastedTextToken[];
   attachments?: ComposerAttachmentToken[];
-  disabled: boolean;
+  submitDisabled: boolean;
   placeholder: string;
   onChange: (value: string) => void;
   onSubmit: (options: { queue: boolean }) => void | Promise<void>;
@@ -100,6 +100,7 @@ type SerializedComposerSkillNode = Spread<
 >;
 
 const MENTION_PILL_CLASS: Record<ComposerMentionKind, string> = {
+  computer: "inline-flex items-center rounded-full border border-sky-6/35 bg-sky-3/20 px-2.5 py-1 text-xs font-medium text-sky-11",
   file: "inline-flex items-center rounded-full border border-gray-6 bg-gray-3 px-2.5 py-1 text-xs font-medium text-gray-11",
   agent: "inline-flex items-center rounded-full border border-sky-6/35 bg-sky-3/20 px-2.5 py-1 text-xs font-medium text-sky-11",
   app: "inline-flex items-center rounded-full border border-cyan-6/35 bg-cyan-3/20 px-2.5 py-1 text-xs font-medium text-cyan-11",
@@ -818,14 +819,9 @@ function SyncPlugin(props: {
   mentions: Record<string, ComposerMentionKind>;
   pastedText?: PastedTextToken[];
   attachments?: ComposerAttachmentToken[];
-  disabled: boolean;
 }) {
   const [editor] = useLexicalComposerContext();
   const valueRef = useRef(props.value);
-
-  useEffect(() => {
-    editor.setEditable(!props.disabled);
-  }, [editor, props.disabled]);
 
   useEffect(() => {
     // When the external value is cleared (e.g. after sending a message),
@@ -892,9 +888,8 @@ function SubmitPlugin(props: { onSubmit: (options: { queue: boolean }) => void |
         if (event?.shiftKey) return false;
         const selection = $getSelection();
         if (!$isRangeSelection(selection)) return false;
-        // Plain Enter submits. Cmd/Ctrl+Enter submits with the queue
-        // modifier — while the agent is busy this queues the message to
-        // send once the current task finishes.
+        // Plain Enter submits. Cmd/Ctrl+Enter is the modifier: while the
+        // agent is busy, Enter queues and the modifier steers.
         event?.preventDefault();
         void onSubmitRef.current({ queue: event?.metaKey === true || event?.ctrlKey === true });
         return true;
@@ -1236,12 +1231,12 @@ export const LexicalPromptEditor = forwardRef<LexicalPromptEditorHandle, EditorP
       onError(error: Error) {
         throw error;
       },
-        editable: !props.disabled,
-        nodes: [ComposerMentionNode, ComposerSlashCommandNode, ComposerSkillNode, ComposerPastedTextNode, ComposerAttachmentNode],
-        editorState: () => {
-          setPrompt(props.value, props.mentions, props.pastedText, props.attachments);
-        },
-      }),
+      editable: true,
+      nodes: [ComposerMentionNode, ComposerSlashCommandNode, ComposerSkillNode, ComposerPastedTextNode, ComposerAttachmentNode],
+      editorState: () => {
+        setPrompt(props.value, props.mentions, props.pastedText, props.attachments);
+      },
+    }),
     [],
   );
 
@@ -1269,7 +1264,7 @@ export const LexicalPromptEditor = forwardRef<LexicalPromptEditorHandle, EditorP
         <PlainTextPlugin
           contentEditable={
             <ContentEditable
-              className="min-h-[60px] max-h-[280px] w-full resize-none overflow-y-auto bg-transparent text-[13px] leading-[1.55] text-dls-text outline-none placeholder:text-dls-secondary [&_p]:min-h-[1.5rem] [&_p]:m-0"
+              className="min-h-[60px] max-h-[280px] w-full resize-none overflow-y-auto bg-transparent text-base leading-6 text-dls-text outline-none placeholder:text-dls-secondary lg:text-[13px] lg:leading-[1.55] [&_p]:min-h-[1.5rem] [&_p]:m-0"
               aria-placeholder={props.placeholder}
               placeholder={<span />}
               onPaste={props.onPaste}
@@ -1279,7 +1274,7 @@ export const LexicalPromptEditor = forwardRef<LexicalPromptEditorHandle, EditorP
             />
           }
           placeholder={
-            <div className="pointer-events-none absolute left-0 top-0 text-[13px] leading-[1.55] text-dls-secondary/70">
+            <div className="pointer-events-none absolute left-0 top-0 text-base leading-6 text-dls-secondary/70 lg:text-[13px] lg:leading-[1.55]">
               {props.placeholder}
             </div>
           }
@@ -1292,9 +1287,8 @@ export const LexicalPromptEditor = forwardRef<LexicalPromptEditorHandle, EditorP
           mentions={props.mentions}
           pastedText={props.pastedText}
           attachments={props.attachments}
-          disabled={props.disabled}
         />
-        <SubmitPlugin onSubmit={props.onSubmit} disabled={props.disabled} />
+        <SubmitPlugin onSubmit={props.onSubmit} disabled={props.submitDisabled} />
         <PasteChipPlugin onPasteText={props.onPasteText} />
         <PastedTextExpandPlugin pastedText={props.pastedText} onExpandPastedText={props.onExpandPastedText} />
         <AttachmentRemovePlugin onRemoveAttachment={props.onRemoveAttachment} />

@@ -80,19 +80,25 @@ describe("cloud super-admin role hierarchy", () => {
     expect(canRefreshInvitationRole("qa-reviewer", superAdmin)).toBe(true);
   });
 
-  test("exposes exact admin sidebar destinations for Extensions, Models, Members, Analytics, and Settings", () => {
-    const shell = read("../app/(den)/dashboard/_components/org-dashboard-shell.tsx");
+  test("exposes exact admin sidebar destinations for Manage, Observability, and Team", () => {
+    const navigation = read("../app/(den)/dashboard/_lib/dashboard-navigation.ts");
 
-    for (const label of ["Extensions", "Marketplace", "Sources", "Plugins", "Connectors", "Models", "OpenWork Models", "Bring your Own Keys", "Members", "Analytics", "Settings"]) {
-      expect(shell).toContain(`label: "${label}"`);
+    for (const label of ["Plugin Directory", "Connectors", "Tool Tester", "Models", "OpenWork Models", "Bring your Own Keys", "Advanced", "Workflow Runs", "Analytics", "Members", "Settings"]) {
+      expect(navigation).toContain(`label: "${label}"`);
     }
 
-    for (const label of ["General", "Diagnostics", "Brand appearance", "Desktop Policies", "Billing", "API Keys", "SSO", "SCIM"]) {
-      expect(shell).toContain(`label: "${label}"`);
+    for (const label of ["General", "Diagnostics", "Billing", "API Keys", "SSO", "SCIM"]) {
+      expect(navigation).toContain(`label: "${label}"`);
     }
 
-    expect(shell).toContain("access.canViewSettings");
-    expect(shell).toContain("access.isAdmin && activeOrg");
+    expect(navigation).toContain('label: "Work"');
+    expect(navigation).toContain('label: "Manage"');
+    expect(navigation).toContain('label: "Observability"');
+    expect(navigation).toContain('label: "Team"');
+    expect(navigation).not.toContain('label: "Extensions"');
+    expect(navigation).not.toContain('label: "Your Connections"');
+    expect(navigation).toContain("access.canViewSettings");
+    expect(navigation).toContain("access.isAdmin && orgSlug");
   });
 
   test("keeps admins read-only across Settings while super-admins inherit mutation flags", () => {

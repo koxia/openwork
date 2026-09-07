@@ -10,12 +10,15 @@ files:
   - from: .electron-runtime/node_modules
     to: node_modules
 extraResources:
+  - from: .electron-runtime/openwork-sentry.json
+    to: openwork-sentry.json
   - from: ../app/dist
     to: app-dist
   - from: server/dist/opencode-plugins
     to: opencode-plugins
     filter:
       - "*.js"
+      - "*.wasm"
   - from: ../../packages/docs
     to: openwork-docs
     filter:
@@ -43,7 +46,7 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
-    NSMicrophoneUsageDescription: OpenWork uses the microphone when you start Voice Mode so you can speak commands to your agent.
+    NSMicrophoneUsageDescription: OpenWork uses the microphone when you allow a page to access audio input.
   extraResources:
     - from: resources/sidecars
       to: sidecars

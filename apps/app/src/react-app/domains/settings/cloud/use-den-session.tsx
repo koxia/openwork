@@ -5,7 +5,6 @@ import { toast } from "@/components/ui/sonner";
 import {
   buildDenAuthUrl,
   clearDenSession,
-  createDenClient,
   DEFAULT_DEN_BASE_URL,
   DenApiError,
   ensureDenActiveOrganization,
@@ -22,6 +21,8 @@ import {
 import { markDesktopSignInInitiated } from "@/app/lib/den-sign-in-intent";
 import { clearDesktopBootstrapConfig } from "@/app/lib/desktop";
 import { exchangeHandoffAndSignIn } from "@/app/lib/den-handoff";
+import { parseManualAuthInput } from "@/app/lib/manual-auth-input";
+import { normalizeOrganizationServerInput } from "@/app/lib/organization-server-input";
 import {
   denSessionUpdatedEvent,
   type DenSessionUpdatedDetail,
@@ -66,33 +67,6 @@ async function runBeforeSignedOut(callback: UseDenSessionProps["onBeforeSignedOu
   } finally {
     if (timeout) clearTimeout(timeout);
   }
-}
-
-function parseManualAuthInput(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  try {
-    const url = new URL(trimmed);
-    const protocol = url.protocol.toLowerCase();
-    const routeHost = url.hostname.toLowerCase();
-    const routePath = url.pathname.replace(/^\/+/, "").toLowerCase();
-    const routeSegments = routePath.split("/").filter(Boolean);
-    const routeTail = routeSegments[routeSegments.length - 1] ?? "";
-    if (
-      (protocol === "openwork:" || protocol === "openwork-dev:") &&
-      (routeHost === "den-auth" || routePath === "den-auth" || routeTail === "den-auth")
-    ) {
-      const grant = url.searchParams.get("grant")?.trim() ?? "";
-      const nextBaseUrl =
-        normalizeDenBaseUrl(url.searchParams.get("denBaseUrl")?.trim() ?? "") ?? undefined;
-      return grant ? { grant, baseUrl: nextBaseUrl } : null;
-    }
-  } catch {
-    // Treat non-URL input as a raw handoff grant.
-  }
-
-  return trimmed.length >= 12 ? { grant: trimmed } : null;
 }
 
 export function useDenSession({
@@ -167,8 +141,15 @@ export function useDenSession({
   }, [activeOrg, activeOrgId, authToken, baseUrl]);
 
   React.useEffect(() => {
-    if (authToken.trim() && denAuth.user) {
-      setUser(denAuth.user);
+    const nextUser = denAuth.user;
+    if (authToken.trim() && nextUser) {
+      setUser((current) => (
+        current?.id === nextUser.id
+        && current.email === nextUser.email
+        && current.name === nextUser.name
+          ? current
+          : nextUser
+      ));
     }
   }, [authToken, denAuth.user, setUser]);
 
@@ -241,12 +222,13 @@ export function useDenSession({
   const openBrowserAuth = React.useCallback(
     (mode: "sign-in" | "sign-up") => {
       const url = buildDenAuthUrl(baseUrl, mode);
+      const usesPasteHandoff = new URL(url).searchParams.get("desktopAuth") === "1";
       markDesktopSignInInitiated();
       setSigninFallbackUrl(url);
       setStatusMessage(
         mode === "sign-up"
-          ? t("den.status_browser_signup")
-          : t("den.status_browser_signin"),
+          ? t(usesPasteHandoff ? "den.status_browser_signup_paste" : "den.status_browser_signup")
+          : t(usesPasteHandoff ? "den.status_browser_signin_paste" : "den.status_browser_signin"),
       );
       setAuthError(null);
       void tryOpenBrowserAuthUrl(url).then((opened) => {
@@ -258,7 +240,8 @@ export function useDenSession({
   );
 
   const applyBaseUrl = React.useCallback(async () => {
-    const normalized = normalizeDenBaseUrl(baseUrlDraft);
+    const serverOrigin = normalizeOrganizationServerInput(baseUrlDraft);
+    const normalized = serverOrigin ? normalizeDenBaseUrl(serverOrigin) : null;
     if (!normalized) {
       setBaseUrlError(t("den.error_base_url"));
       return;
@@ -393,7 +376,18 @@ export function useDenSession({
 
       try {
         const response = await client.listOrgs();
-        setOrgs(response.orgs);
+        setOrgs((currentOrgs) => (
+          currentOrgs.length === response.orgs.length
+          && currentOrgs.every((org, index) => {
+            const nextOrg = response.orgs[index];
+            return org.id === nextOrg?.id
+              && org.name === nextOrg.name
+              && org.slug === nextOrg.slug
+              && org.role === nextOrg.role;
+          })
+            ? currentOrgs
+            : response.orgs
+        ));
         const current = activeOrgId.trim();
 
         // Determine the next org to select:
@@ -409,7 +403,7 @@ export function useDenSession({
         // else: leave next = "" so the org picker is shown
 
         const nextOrg = next ? (response.orgs.find((org) => org.id === next) ?? null) : null;
-        setActiveOrgId(next);
+        setActiveOrgId((currentId) => currentId === next ? currentId : next);
         writeDenSettings({
           baseUrl,
           authToken: authToken || null,
@@ -419,7 +413,14 @@ export function useDenSession({
         });
         // Push to context immediately so consumers see the new org
         if (nextOrg) {
-          setActiveOrganization({ id: nextOrg.id, name: nextOrg.name, role: nextOrg.role, slug: nextOrg.slug });
+          setActiveOrganization((currentOrg) => (
+            currentOrg?.id === nextOrg.id
+            && currentOrg.name === nextOrg.name
+            && currentOrg.role === nextOrg.role
+            && currentOrg.slug === nextOrg.slug
+              ? currentOrg
+              : { id: nextOrg.id, name: nextOrg.name, role: nextOrg.role, slug: nextOrg.slug }
+          ));
         } else if (!next) {
           setActiveOrganization(null);
         }
@@ -438,10 +439,11 @@ export function useDenSession({
     [activeOrgId, authToken, baseUrl, client, setActiveOrganization],
   );
 
+  const userId = user?.id ?? "";
   React.useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
     void refreshOrgs(true);
-  }, [refreshOrgs, user]);
+  }, [refreshOrgs, userId]);
 
   React.useEffect(() => {
     const handler = (event: WindowEventMap[typeof denSessionUpdatedEvent]) => {
@@ -496,11 +498,9 @@ export function useDenSession({
     setStatusMessage(t("den.signing_in"));
 
     try {
-      const exchangeClient = createDenClient({ baseUrl: nextBaseUrl });
       // The helper exchanges, persists, and dispatches the success/error session events.
       const result = await exchangeHandoffAndSignIn(parsed.grant, {
         baseUrl: nextBaseUrl,
-        client: exchangeClient,
         // Pasted one-time codes are desktop-initiated sign-ins.
         desktopInitiated: true,
         fallbackErrorMessage: t("den.error_no_token"),

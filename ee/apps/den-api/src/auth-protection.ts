@@ -13,6 +13,7 @@ export const EMAIL_PASSWORD_SIGN_UP_PATH = "/api/auth/sign-up/email"
 export const CHANGE_PASSWORD_PATH = "/api/auth/change-password"
 export const RESET_PASSWORD_PATH = "/api/auth/reset-password"
 export const MIN_PASSWORD_LENGTH = 8
+export const MAX_PASSWORD_LENGTH = 32
 export const MIN_PASSWORD_STRENGTH_SCORE = 3
 export const LOGIN_LOCKOUT_FAILURE_THRESHOLD = 5
 export const LOGIN_LOCKOUT_FAILURE_WINDOW_MS = 60 * 60 * 1000
@@ -34,6 +35,11 @@ type LockoutStatus = {
 }
 
 type PwnedPasswordsFetch = (input: string, init?: RequestInit) => Promise<Response>
+
+type PasswordPolicyViolation = {
+  error: string
+  message: string
+}
 
 const passwordStrengthEstimator = new ZxcvbnFactory({
   translations: englishPasswordTranslations,
@@ -85,6 +91,12 @@ function lockoutKey(email: string) {
   return `auth:email-password-lockout:${digest}`
 }
 
+/**
+ * SHA-1 is the Have I Been Pwned k-anonymity protocol, not credential
+ * storage: only the first five hex characters ever leave this process, the
+ * digest is compared against the returned range, and the value is never
+ * persisted. Password-at-rest hashing is handled by better-auth.
+ */
 function hashPasswordForRangeLookup(password: string) {
   return createHash("sha1").update(password).digest("hex").toUpperCase()
 }
@@ -241,6 +253,52 @@ function getPasswordStrengthMessage(feedback: { warning: string | null; suggesti
   return feedback.warning?.trim() || feedback.suggestions.find((suggestion) => suggestion.trim().length > 0)?.trim() || "Password is too weak."
 }
 
+function getPasswordPolicyViolation(password: string): PasswordPolicyViolation | null {
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return {
+      error: "password_too_short",
+      message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`,
+    }
+  }
+
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    return {
+      error: "password_too_long",
+      message: `Password must be at most ${MAX_PASSWORD_LENGTH} characters.`,
+    }
+  }
+
+  if (!/[A-Z]/u.test(password)) {
+    return {
+      error: "password_missing_uppercase",
+      message: "Password must include at least one uppercase letter.",
+    }
+  }
+
+  if (!/[a-z]/u.test(password)) {
+    return {
+      error: "password_missing_lowercase",
+      message: "Password must include at least one lowercase letter.",
+    }
+  }
+
+  if (!/[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/u.test(password)) {
+    return {
+      error: "password_missing_special_character",
+      message: "Password must include at least one special character.",
+    }
+  }
+
+  if (!/[0-9]/u.test(password)) {
+    return {
+      error: "password_missing_digit",
+      message: "Password must include at least one digit.",
+    }
+  }
+
+  return null
+}
+
 export async function isPasswordCompromised(password: string, fetchPasswordRange: PwnedPasswordsFetch = fetch) {
   const hash = hashPasswordForRangeLookup(password)
   const prefix = hash.slice(0, 5)
@@ -279,36 +337,33 @@ export async function getBreachedPasswordResponse(
     return null
   }
 
-  let compromised: boolean
   try {
-    compromised = await isPasswordCompromised(password, fetchPasswordRange)
+    const compromised = await isPasswordCompromised(password, fetchPasswordRange)
+    return compromised
+      ? jsonError(400, {
+          error: "password_compromised",
+          message: "This password appeared in a data breach. Choose a different one.",
+        })
+      : null
   } catch {
     return jsonError(503, {
       error: "password_screening_unavailable",
       message: "Something went wrong. Please try again in a moment.",
     })
   }
-
-  if (!compromised) {
-    return null
-  }
-
-  return jsonError(400, {
-    error: "password_compromised",
-    message: "This password appeared in a data breach. Choose a different one.",
-  })
 }
 
-export async function getShortPasswordResponse(request: Request) {
+export async function getPasswordPolicyResponse(request: Request) {
   const password = await readPasswordForBreachCheck(request)
-  if (password === null || password.length >= MIN_PASSWORD_LENGTH) {
+  if (password === null) {
     return null
   }
 
-  return jsonError(400, {
-    error: "password_too_short",
-    message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`,
-  })
+  const violation = getPasswordPolicyViolation(password)
+  if (!violation) {
+    return null
+  }
+  return jsonError(400, violation)
 }
 
 export async function getWeakPasswordResponse(request: Request) {

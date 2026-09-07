@@ -2,27 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  BarChart3,
-  CalendarClock,
   ChevronDown,
   ChevronRight,
   FileText,
-  Globe,
-  Home,
-  LibraryBig,
   LogOut,
   Menu,
   MessageSquare,
-  ScrollText,
-  Plug,
-  Puzzle,
-  SlidersHorizontal,
-  Sparkles,
-  type LucideIcon,
-  Users,
-  Wrench,
   X,
 } from "lucide-react";
 import { useDenFlow } from "../../_providers/den-flow-provider";
@@ -38,6 +25,7 @@ import {
   getCustomLlmProvidersRoute,
   getDiagnosticsRoute,
   getDesktopPoliciesRoute,
+  getManagedDashboardsRoute,
   getOrgAccessFlags,
   getIntegrationsRoute,
   getInferenceRoute,
@@ -50,39 +38,29 @@ import {
   getOrgDashboardRoute,
   getOrgSettingsRoute,
   getMarketplacesRoute,
+  getMarketplaceOnboardingRoute,
   getPluginsRoute,
   getSsoRoute,
   getScimRoute,
-  getScriptRunsRoute,
+  getWorkflowRunsRoute,
   getWebRoute,
 } from "../../_lib/den-org";
 import { useOrgListWindow } from "../../_lib/use-org-list-window";
 import { useOrgDashboard } from "../_providers/org-dashboard-provider";
 import { buildDenFeedbackUrl } from "../../_lib/feedback";
-import { OrgSelectionScreen } from "./org-selection-screen";
+import { OrgSelectionScreen } from "../_features/org-selection/org-selection-screen";
+import {
+  buildDashboardNavSections,
+  type DashboardNavChild,
+} from "../_lib/dashboard-navigation";
+import { DenCommandPalette } from "./command-palette/den-command-palette";
+import {
+  DenSearchBar,
+  type DenSearchBarHandle,
+} from "./command-palette/den-search-bar";
 import { UserProfileDialog } from "./user-profile-dialog";
 
-const OPENWORK_DOCS_URL = "/docs";
-
-type DashboardNavChild = {
-  href: string;
-  label: string;
-  badge?: string;
-};
-
-type DashboardNavItem = {
-  href: string;
-  label: string;
-  icon: LucideIcon;
-  badge?: string;
-  testId?: string;
-  /**
-   * Grouped entries (Extensions, Models, Settings) keep the sidebar at seven
-   * top-level rows: the group links to its first child and its children
-   * render indented while the current page is inside the group.
-   */
-  children?: DashboardNavChild[];
-};
+const OPENWORK_DOCS_URL = "https://openworklabs.com/docs";
 
 function OrgMark({ name }: { name: string }) {
   const initials = useMemo(() => {
@@ -262,13 +240,17 @@ function getDashboardPageTitle(pathname: string, orgSlug: string | null) {
     return "Background Tasks";
   }
   if (pathname.startsWith(getAutomationsRoute(orgSlug))) {
-    return "Automations";
+    return "My Automations";
   }
   if (pathname.startsWith(getCustomLlmProvidersRoute(orgSlug))) {
     return "Bring your Own Keys";
   }
-  if (pathname.startsWith(getDesktopPoliciesRoute(orgSlug))) {
-    return "Desktop Policies";
+  if (
+    pathname.startsWith(getDesktopPoliciesRoute(orgSlug))
+    || pathname.startsWith(getMarketplacesRoute(orgSlug))
+    || pathname.startsWith(getBrandAppearanceRoute(orgSlug))
+  ) {
+    return "Advanced";
   }
   if (pathname.startsWith(getDiagnosticsRoute(orgSlug))) {
     return "Diagnostics";
@@ -277,34 +259,34 @@ function getDashboardPageTitle(pathname: string, orgSlug: string | null) {
     return "OpenWork Models";
   }
   if (pathname.startsWith(getWebRoute(orgSlug))) {
-    return "Web";
+    return "OpenWork Web";
   }
   if (pathname.startsWith(getLibraryRoute(orgSlug))) {
-    return "Library";
+    return "My Library";
   }
   if (pathname.startsWith(getPluginsRoute(orgSlug))) {
-    return "Plugins";
-  }
-  if (pathname.startsWith(getMarketplacesRoute(orgSlug))) {
-    return "Marketplace";
+    return "Plugin Directory";
   }
   if (pathname.startsWith(getIntegrationsRoute(orgSlug))) {
-    return "Sources";
+    return "Plugin Directory";
   }
   if (pathname.startsWith(getMcpConnectionsRoute(orgSlug))) {
     return "Connectors";
   }
+  if (pathname.startsWith(getManagedDashboardsRoute(orgSlug))) {
+    return "Dashboards";
+  }
   if (pathname.startsWith(getYourConnectionsRoute(orgSlug))) {
     return "Your Connections";
+  }
+  if (pathname.startsWith(getWorkflowRunsRoute(orgSlug))) {
+    return "Workflow Runs";
   }
   if (pathname.startsWith(getToolTesterRoute(orgSlug))) {
     return "Tool Tester";
   }
   if (pathname.startsWith(getBillingRoute(orgSlug))) {
     return "Billing";
-  }
-  if (pathname.startsWith(getBrandAppearanceRoute(orgSlug))) {
-    return "Brand appearance";
   }
   if (pathname.startsWith(getOrgSettingsRoute(orgSlug))) {
     return "Org Settings";
@@ -315,12 +297,14 @@ function getDashboardPageTitle(pathname: string, orgSlug: string | null) {
 
 export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const onboardingRoute = getMarketplaceOnboardingRoute();
+  const isOnboarding = pathname === onboardingRoute || pathname.startsWith(`${onboardingRoute}/`);
   const { user, signOut, updateUserProfile, runtimeConfig, runtimeConfigLoaded } = useDenFlow();
   const {
     activeOrg,
     orgDirectory,
     orgContext,
-    orgSelectionRequired,
+    orgSelectionOpen,
     orgBusy,
     orgError,
     mutationBusy,
@@ -328,8 +312,11 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
   } = useOrgDashboard();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [profilePromptDismissed, setProfilePromptDismissed] = useState(false);
   const switcherTriggerRef = useRef<HTMLButtonElement>(null);
+  const searchBarRef = useRef<DenSearchBarHandle>(null);
+  const commandPaletteWasOpenRef = useRef(false);
   const isSingleOrgMode = runtimeConfigLoaded && runtimeConfig.orgMode === "single_org";
   const {
     query: switcherQuery,
@@ -341,6 +328,36 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
     showMore: showMoreOrgDirectory,
     showSearch: showSwitcherSearch,
   } = useOrgListWindow(orgDirectory, 20);
+
+  const handleCommandPaletteOpenChange = useCallback((open: boolean) => {
+    setCommandPaletteOpen(open);
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (isOnboarding) return;
+      if (
+        event.key.toLowerCase() !== "k"
+        || (!event.metaKey && !event.ctrlKey)
+        || event.shiftKey
+        || event.altKey
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setCommandPaletteOpen((current) => !current);
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isOnboarding]);
+
+  useEffect(() => {
+    if (commandPaletteWasOpenRef.current && !commandPaletteOpen) {
+      searchBarRef.current?.focus();
+    }
+    commandPaletteWasOpenRef.current = commandPaletteOpen;
+  }, [commandPaletteOpen]);
 
   useEffect(() => {
     if (!switcherOpen) return;
@@ -368,15 +385,26 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
     };
   }, [switcherOpen]);
 
-  if (orgSelectionRequired) {
+  // The picker replaces the whole shell until a workspace is chosen.
+  if (orgSelectionOpen) {
     return (
       <OrgSelectionScreen
         orgs={orgDirectory}
-        onSelect={switchOrganization}
+        pending={mutationBusy === "switch-organization"}
+        errorMessage={orgError}
+        onPick={switchOrganization}
         onSignOut={() => void signOut()}
-        busy={mutationBusy === "switch-organization"}
-        error={orgError}
       />
+    );
+  }
+
+  // Setup owns the full page until the user leaves for their dashboard.
+  if (isOnboarding) {
+    return (
+      <>
+        <WorkspaceFavicon metadata={orgContext?.organization.metadata} />
+        <main data-testid="den-onboarding-shell">{children}</main>
+      </>
     );
   }
 
@@ -397,137 +425,20 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
     pathname,
     orgSlug: activeOrg?.slug,
   });
-  const mcpConnectionsEnabled = orgContext?.capabilities.mcpConnections === true;
-  const codemodeScriptsEnabled = orgContext?.capabilities.codemodeScripts === true;
-  // Web access is backed by the existing hosted cloud capability. The org
-  // payload only reports `cloud` after the server rollout helper has verified
-  // the multi-org deployment gate, so the sidebar stays hidden by default until
-  // both config and org context load.
-  const showWeb = runtimeConfigLoaded && orgContext?.capabilities.cloud === true;
-
-  // Top-level rows: Dashboard, Library, optional Your Connections, Extensions, Models,
-  // Members, Analytics, Settings. Everything tool-shaped groups under
-  // Extensions starts with the Marketplace, followed by its source and
-  // management surfaces; model config groups under
-  // Models; set-once governance groups under Settings.
-  const extensionsGroup: DashboardNavItem | null = access.isAdmin && activeOrg
-    ? {
-        href: getMarketplacesRoute(activeOrg.slug),
-        label: "Extensions",
-        icon: Puzzle,
-        children: [
-          { href: getMarketplacesRoute(activeOrg.slug), label: "Marketplace" },
-          { href: getIntegrationsRoute(activeOrg.slug), label: "Sources", badge: "Alpha" },
-          { href: getPluginsRoute(activeOrg.slug), label: "Plugins" },
-          { href: getMcpConnectionsRoute(activeOrg.slug), label: "Connectors", badge: "Beta" },
-        ],
-      }
-    : null;
-  // OpenWork Models are a hosted OpenWork Cloud offering; self-hosted
-  // (single-org) deployments only manage their own LLM providers. Default
-  // hidden until the runtime config confirms a hosted (multi-org) deployment.
-  const showOpenWorkModels = runtimeConfigLoaded && runtimeConfig.orgMode === "multi_org";
-  const modelsGroup: DashboardNavItem | null = access.isAdmin && activeOrg
-    ? {
-        href: showOpenWorkModels
-          ? getInferenceRoute(activeOrg.slug)
-          : getCustomLlmProvidersRoute(activeOrg.slug),
-        label: "Models",
-        icon: Sparkles,
-        children: [
-          ...(showOpenWorkModels
-            ? [{ href: getInferenceRoute(activeOrg.slug), label: "OpenWork Models" }]
-            : []),
-          { href: getCustomLlmProvidersRoute(activeOrg.slug), label: "Bring your Own Keys" },
-        ],
-      }
-    : null;
-  const settingsChildren: DashboardNavChild[] = activeOrg
-    ? [
-        ...(access.canViewSettings
-          ? [
-              { href: getOrgSettingsRoute(activeOrg.slug), label: "General" },
-              { href: getDiagnosticsRoute(activeOrg.slug), label: "Diagnostics" },
-              { href: getBrandAppearanceRoute(activeOrg.slug), label: "Brand appearance" },
-              { href: getDesktopPoliciesRoute(activeOrg.slug), label: "Desktop Policies" },
-              { href: getBillingRoute(activeOrg.slug), label: "Billing" },
-              { href: getApiKeysRoute(activeOrg.slug), label: "API Keys" },
-              { href: getSsoRoute(activeOrg.slug), label: "SSO" },
-              { href: getScimRoute(activeOrg.slug), label: "SCIM" },
-            ]
-          : []),
-      ]
-    : [];
-  const settingsGroup: DashboardNavItem | null = settingsChildren.length > 0
-    ? {
-        href: settingsChildren[0].href,
-        label: "Settings",
-        icon: SlidersHorizontal,
-        children: settingsChildren,
-      }
-    : null;
-
-  const navItems: DashboardNavItem[] = [
-    {
-      href: activeOrg ? getOrgDashboardRoute(activeOrg.slug) : "#",
-      label: "Dashboard",
-      icon: Home,
+  const navSections = buildDashboardNavSections({
+    orgSlug: activeOrg?.slug ?? null,
+    access,
+    capabilities: orgContext?.capabilities ?? {
+      cloud: false,
+      installLinks: false,
+      mcpConnections: false,
+      openworkWeb: false,
+      orgManagedDashboards: false,
+      workflows: false,
     },
-    {
-      href: activeOrg ? getLibraryRoute(activeOrg.slug) : "#",
-      label: "Library",
-      icon: LibraryBig,
-    },
-    ...(codemodeScriptsEnabled && activeOrg
-      ? [{
-          href: getAutomationsRoute(activeOrg.slug),
-          label: "Automations",
-          icon: CalendarClock,
-        }]
-      : []),
-    ...(mcpConnectionsEnabled
-      ? [{
-          // Member-visible (not admin-gated): where each person connects their
-          // own account for per-member connections shared with them.
-          href: activeOrg ? getYourConnectionsRoute(activeOrg.slug) : "#",
-          label: "Your Connections",
-          icon: Plug,
-          badge: "Beta",
-        }]
-      : []),
-    ...(mcpConnectionsEnabled && access.isAdmin && activeOrg
-      ? [{
-          href: getToolTesterRoute(activeOrg.slug),
-          label: "Tool Tester",
-          icon: Wrench,
-        }]
-      : []),
-    ...(showWeb
-      ? [{
-          href: activeOrg ? getWebRoute(activeOrg.slug) : "#",
-          label: "Web",
-          icon: Globe,
-          badge: "Alpha",
-        }]
-      : []),
-    ...(codemodeScriptsEnabled && activeOrg
-      ? [{
-          href: getScriptRunsRoute(activeOrg.slug),
-          label: "Script runs",
-          icon: ScrollText,
-          testId: "nav-script-runs",
-        }]
-      : []),
-    ...(extensionsGroup ? [extensionsGroup] : []),
-    ...(modelsGroup ? [modelsGroup] : []),
-    ...(access.isAdmin && activeOrg
-      ? [
-          { href: getMembersRoute(activeOrg.slug), label: "Members", icon: Users },
-          { href: getAnalyticsRoute(activeOrg.slug), label: "Analytics", icon: BarChart3 },
-        ]
-      : []),
-    ...(settingsGroup ? [settingsGroup] : []),
-  ];
+    orgMode: runtimeConfig.orgMode,
+    runtimeConfigLoaded,
+  });
 
   const orgSwitcher = isSingleOrgMode ? (
     <div className="flex w-full items-center justify-between gap-3 rounded-xl px-2 py-2">
@@ -609,7 +520,7 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
                 value={switcherQuery}
                 onChange={(event) => setSwitcherQuery(event.target.value)}
                 placeholder="Search workspaces"
-                className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[12px] text-gray-900 outline-none transition focus:border-gray-400"
+                className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[12px] text-gray-900 outline-hidden transition focus:border-gray-400"
               />
             </div>
           ) : null}
@@ -690,8 +601,8 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
   );
 
   const sidebarContent = (
-    <div className="flex flex-1 flex-col">
-      <div className="border-b border-gray-100 px-4 pb-4 pt-5">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="shrink-0 border-b border-gray-100 px-4 pb-4 pt-5">
         <div className="flex items-center justify-between gap-3">
           <SidebarBrandMark
             metadata={orgContext?.organization.metadata}
@@ -708,84 +619,103 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
         </div>
       </div>
 
-      <nav className="flex-1 px-3 py-5">
-        <p className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-400">
-          Navigation
-        </p>
-        <div className="space-y-1">
-          {navItems.map((item) => {
-            const isDashboardRoot =
-              activeOrg && item.href === getOrgDashboardRoute(activeOrg.slug);
-            const childActive = (child: DashboardNavChild) =>
-              pathname === child.href || pathname.startsWith(`${child.href}/`);
-            const groupActive = (item.children ?? []).some(childActive);
-            const selected =
-              item.href !== "#" &&
-              (item.children
-                ? groupActive
-                : isDashboardRoot
-                  ? pathname === item.href
-                  : pathname === item.href || pathname.startsWith(`${item.href}/`));
+      <nav className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-5" data-testid="den-org-sidebar">
+        <div className="space-y-5">
+          {navSections.map((section) => (
+            <div key={section.label} data-sidebar-section={section.label.toLowerCase()}>
+              <p className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-400">
+                {section.label}
+              </p>
+              <div className="space-y-1">
+                {section.items.map((item) => {
+                  const isDashboardRoot =
+                    activeOrg && item.href === getOrgDashboardRoute(activeOrg.slug);
+                  const isLibraryItem =
+                    Boolean(activeOrg && item.href === getLibraryRoute(activeOrg.slug));
+                  const childActive = (child: DashboardNavChild) =>
+                    pathname === child.href || pathname.startsWith(`${child.href}/`);
+                  const groupActive = (item.children ?? []).some(childActive);
+                  const selected =
+                    item.href !== "#" &&
+                    (item.children
+                      ? groupActive
+                      : isDashboardRoot
+                        ? pathname === item.href
+                        : isLibraryItem
+                          ? pathname === item.href
+                            || pathname.startsWith(`${item.href}/`)
+                            || (activeOrg != null && (
+                              pathname === getYourConnectionsRoute(activeOrg.slug)
+                              || pathname.startsWith(`${getYourConnectionsRoute(activeOrg.slug)}/`)
+                            ))
+                          : pathname === item.href
+                            || pathname.startsWith(`${item.href}/`)
+                            || (item.matchHrefs ?? []).some(
+                              (href) => pathname === href || pathname.startsWith(`${href}/`),
+                            ));
 
-            return (
-              <div key={item.label}>
-                <Link
-                  href={item.href}
-                  data-testid={item.testId}
-                  onClick={() => setSidebarOpen(false)}
-                  className={`flex items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-[13px] tracking-[-0.1px] transition-colors ${
-                    selected
-                      ? "bg-gray-100 text-gray-900"
-                      : "text-gray-500 hover:bg-gray-50 hover:text-gray-700"
-                  }`}
-                >
-                  <span className="flex items-center gap-3">
-                    <item.icon className="h-4 w-4" strokeWidth={1.8} />
-                    {item.label}
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    {item.badge ? (
-                      <span className="rounded-full bg-white px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-gray-500">
-                        {item.badge}
-                      </span>
-                    ) : null}
-                    {item.children ? (
-                      groupActive
-                        ? <ChevronDown className="h-3.5 w-3.5 text-gray-400" strokeWidth={2} />
-                        : <ChevronRight className="h-3.5 w-3.5 text-gray-300" strokeWidth={2} />
-                    ) : null}
-                  </span>
-                </Link>
-                {item.children && groupActive ? (
-                  <div className="ml-[22px] mt-1 space-y-0.5 border-l border-gray-100 pl-3">
-                    {item.children.map((child) => (
+                  return (
+                    <div key={item.label}>
                       <Link
-                        key={child.label}
-                        href={child.href}
+                        href={item.href}
+                        data-testid={item.testId}
                         onClick={() => setSidebarOpen(false)}
-                        className={`flex items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-[13px] tracking-[-0.1px] transition-colors ${
-                          childActive(child)
-                            ? "font-medium text-gray-900"
-                            : "text-gray-500 hover:text-gray-700"
+                        className={`flex min-w-0 items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-[13px] tracking-[-0.1px] transition-colors ${
+                          selected
+                            ? "bg-gray-100 text-gray-900"
+                            : "text-gray-500 hover:bg-gray-50 hover:text-gray-700"
                         }`}
                       >
-                        {child.label}
-                        {child.badge ? (
-                          <span className="rounded-full bg-white px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-gray-500">
-                            {child.badge}
-                          </span>
-                        ) : null}
+                        <span className="flex min-w-0 items-center gap-3">
+                          <item.icon className="h-4 w-4 shrink-0" strokeWidth={1.8} />
+                          <span className="min-w-0 truncate">{item.label}</span>
+                        </span>
+                        <span className="flex shrink-0 items-center gap-1.5">
+                          {item.badge ? (
+                            <span className="rounded-full bg-white px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-gray-500">
+                              {item.badge}
+                            </span>
+                          ) : null}
+                          {item.children ? (
+                            groupActive
+                              ? <ChevronDown className="h-3.5 w-3.5 text-gray-400" strokeWidth={2} />
+                              : <ChevronRight className="h-3.5 w-3.5 text-gray-300" strokeWidth={2} />
+                          ) : null}
+                        </span>
                       </Link>
-                    ))}
-                  </div>
-                ) : null}
+                      {item.children && groupActive ? (
+                        <div className="ml-[22px] mt-1 min-w-0 space-y-0.5 border-l border-gray-100 pl-3">
+                          {item.children.map((child) => (
+                            <Link
+                              key={child.label}
+                              href={child.href}
+                              onClick={() => setSidebarOpen(false)}
+                              className={`flex min-w-0 items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-[13px] tracking-[-0.1px] transition-colors ${
+                                childActive(child)
+                                  ? "font-medium text-gray-900"
+                                  : "text-gray-500 hover:text-gray-700"
+                              }`}
+                            >
+                              <span className="min-w-0 truncate">{child.label}</span>
+                              {child.badge ? (
+                                <span className="shrink-0 rounded-full bg-white px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-gray-500">
+                                  {child.badge}
+                                </span>
+                              ) : null}
+                            </Link>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       </nav>
 
-      <div className="mt-auto p-3">
+      <div className="mt-auto shrink-0 p-3" data-testid="den-org-sidebar-footer">
         {orgSwitcher}
 
         {orgBusy ? (
@@ -802,7 +732,7 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen flex-col bg-[#fafafa] md:h-screen md:flex-row">
       <WorkspaceFavicon metadata={orgContext?.organization.metadata} />
       {/* Desktop sidebar — always visible at md+ */}
-      <aside className="hidden shrink-0 border-r border-gray-100 bg-white md:flex md:min-h-screen md:w-[260px] md:flex-col">
+      <aside className="hidden min-h-0 shrink-0 overflow-hidden border-r border-gray-100 bg-white md:flex md:h-screen md:w-[260px] md:flex-col">
         {sidebarContent}
       </aside>
 
@@ -810,7 +740,7 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
       {sidebarOpen ? (
         <div className="fixed inset-0 z-50 md:hidden">
           <div className="absolute inset-0 bg-black/30" onClick={() => setSidebarOpen(false)} aria-hidden />
-          <aside className="relative z-10 flex h-full w-[280px] max-w-[85vw] flex-col overflow-y-auto bg-white shadow-xl">
+          <aside className="relative z-10 flex h-full min-h-0 w-[280px] max-w-[85vw] flex-col overflow-hidden bg-white shadow-xl">
             {sidebarContent}
           </aside>
         </div>
@@ -818,7 +748,7 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center justify-between border-b border-gray-100 bg-white px-4 md:px-6">
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <button
               type="button"
               className="rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 md:hidden"
@@ -832,7 +762,14 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
             </span>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex flex-1 justify-center px-4">
+            <DenSearchBar
+              ref={searchBarRef}
+              onOpen={() => handleCommandPaletteOpenChange(true)}
+            />
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1">
             {showFeedbackLink ? (
               <a
                 href={feedbackHref}
@@ -858,6 +795,11 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
 
         <main className="flex-1 overflow-y-auto bg-[#fafafa]">{children}</main>
       </div>
+
+      <DenCommandPalette
+        open={commandPaletteOpen}
+        onOpenChange={handleCommandPaletteOpenChange}
+      />
 
       {shouldShowProfilePrompt && user ? (
         <UserProfileDialog

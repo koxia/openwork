@@ -41,6 +41,10 @@ import {
 } from "./connect-state.js";
 import { readJsoncFile } from "./jsonc.js";
 import {
+  inspectLocalManagedMcpVault,
+  type LocalManagedMcpVaultInspection,
+} from "./local-managed-mcp.js";
+import {
   inspectMcpLayersFromRuntimeSnapshot,
   type McpConfigCollision,
   type McpInventoryInspection,
@@ -48,7 +52,9 @@ import {
 import { resolveWorkspaceOpencodeConnection } from "./opencode-connection.js";
 import { buildOpenworkRuntimeConfigObjectFromSnapshot } from "./openwork-runtime-config.js";
 import {
+  ENGINE_GLOBAL_RUNTIME_CONFIG_ID,
   inspectRuntimeOpencodeConfigState,
+  mergeRuntimeOpencodeConfigLayers,
   runtimeMcpMap,
   type RuntimeOpencodeConfig,
   type RuntimeOpencodeConfigInspection,
@@ -332,7 +338,7 @@ function promptEvidence(configuredAgent: Record<string, unknown> | null) {
     markers: {
       searchCapabilities: prompt.includes("search_capabilities"),
       executeCapability: prompt.includes("execute_capability"),
-      memoryBank: prompt.includes("Memory Bank"),
+      artifacts: prompt.includes("## OpenWork Artifacts"),
     },
   };
 }
@@ -1177,6 +1183,7 @@ function runtimeHealthCheck(
   workspace: WorkspaceInfo,
   engineConfigured: boolean,
   inspection: RuntimeOpencodeConfigInspection,
+  managedVault: LocalManagedMcpVaultInspection | null,
   durationMs: number,
 ): AgentContextDiagnosticCheck {
   const corrupt = inspection.status === "unreadable"
@@ -1222,6 +1229,9 @@ function runtimeHealthCheck(
       workspaceType: workspace.workspaceType,
       remoteType: workspace.remoteType ?? null,
       runtimeInspectionStatus: inspection.status,
+      managedMcpVaultStatus: managedVault ? managedVault.status : "not-inspected",
+      managedMcpVaultRecoveredAt: managedVault?.recovery?.at ?? null,
+      managedMcpVaultQuarantinedTo: managedVault?.recovery?.quarantinedTo ?? null,
     },
     durationMs,
   });
@@ -1276,10 +1286,25 @@ export async function runAgentContextDiagnostics(input: {
     : await inspectRuntimeOpencodeConfigState(input.config, input.workspace.id, {
       signal: input.dependencies?.signal,
     });
+  // Passive plaintext read of the managed MCP credential vault: surfaces
+  // secure-storage recovery evidence without decrypting and never throws.
+  const managedVaultInspection = input.workspace.workspaceType === "remote"
+    ? null
+    : await inspectLocalManagedMcpVault(input.config);
+  const globalRuntimeInspection = await inspectRuntimeOpencodeConfigState(
+    input.config,
+    ENGINE_GLOBAL_RUNTIME_CONFIG_ID,
+    { signal: input.dependencies?.signal },
+  );
+  const runtime = input.workspace.workspaceType === "remote"
+    ? globalRuntimeInspection.config
+    : mergeRuntimeOpencodeConfigLayers(globalRuntimeInspection.config, runtimeInspection.config);
   input.dependencies?.signal?.throwIfAborted();
   const runtimeDuration = elapsed(runtimeStarted, now);
-  const runtime = runtimeInspection.config;
-  const expectedRuntimeConfig = buildOpenworkRuntimeConfigObjectFromSnapshot(runtime);
+  // The injected engine config file is rendered from the ENGINE_GLOBAL row
+  // only; the merged per-workspace runtime row informs MCP inventory below
+  // but is not part of the injected file.
+  const expectedRuntimeConfig = buildOpenworkRuntimeConfigObjectFromSnapshot(globalRuntimeInspection.config);
   const expectedAgents = isRecord(expectedRuntimeConfig.agent) ? expectedRuntimeConfig.agent : {};
   const expectedAgent = isRecord(expectedAgents.openwork) ? expectedAgents.openwork : null;
   const effectiveOpenworkAgent = effectiveEngine?.agents.find((agent) => agent.name === "openwork") ?? null;
@@ -1301,7 +1326,7 @@ export async function runAgentContextDiagnostics(input: {
   const expectedPrompt = promptEvidence(expectedAgent);
   const promptMarkersPresent = prompt.markers.searchCapabilities
     && prompt.markers.executeCapability
-    && prompt.markers.memoryBank;
+    && prompt.markers.artifacts;
   const canonicalPromptDigestMatch = prompt.sha256 !== null
     && expectedPrompt.sha256 !== null
     && prompt.sha256 === expectedPrompt.sha256;
@@ -1548,7 +1573,7 @@ export async function runAgentContextDiagnostics(input: {
         organizationConnectionsTruncated: request.organizationConnectionsProbe.truncated,
       },
     }),
-    runtimeHealthCheck(input.workspace, engineConfigured, runtimeInspection, runtimeDuration),
+    runtimeHealthCheck(input.workspace, engineConfigured, runtimeInspection, managedVaultInspection, runtimeDuration),
     diagnosticCheck({
       id: "connect-steering-scope",
       status: !connectSnapshotAvailable || crossWorkspaceSteeringDrift ? "warning" : "passed",

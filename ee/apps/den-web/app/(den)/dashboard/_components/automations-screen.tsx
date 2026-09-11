@@ -42,7 +42,7 @@ function PlacementIcon({ executionTarget }: { executionTarget: "desktop" | "clou
 /** The surface that owns an Automation's lifecycle: Web for Cloud placement, Desktop for Desktop placement. */
 function ManageLink({ item, openworkWebUrl }: { item: { automation: { id: string }; revision: { executionTarget?: "desktop" | "cloud" } }; openworkWebUrl: string }) {
   if (item.revision.executionTarget === "cloud") {
-    const href = `${openworkWebUrl.replace(/\/$/, "")}/automations?automation=${encodeURIComponent(item.automation.id)}`;
+    const href = `${openworkWebUrl.replace(/\/$/, "")}/dashboard/automations?automation=${encodeURIComponent(item.automation.id)}`;
     return <DenButton variant="secondary" size="sm" href={href} target="_blank" rel="noopener noreferrer" icon={ExternalLink}>Manage in OpenWork Web</DenButton>;
   }
   return <span className="inline-flex items-center gap-1.5 text-[12px] text-gray-400"><Monitor className="h-3.5 w-3.5" />Manage in OpenWork Desktop</span>;
@@ -105,7 +105,7 @@ export function AutomationsScreen() {
             <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-gray-950">My Automations</h1>
             <p className="mt-1 text-[13px] text-gray-400">What Den is running and has scheduled for you. Create and edit Cloud Automations in OpenWork Web; Desktop Automations are managed in the desktop app.</p>
           </div>
-          <DenButton href={`${runtimeConfig.openworkWebUrl.replace(/\/$/, "")}/automations`} target="_blank" rel="noopener noreferrer" icon={ExternalLink}>Open in OpenWork Web</DenButton>
+          <DenButton href={`${runtimeConfig.openworkWebUrl.replace(/\/$/, "")}/dashboard/automations`} target="_blank" rel="noopener noreferrer" icon={ExternalLink}>Open in OpenWork Web</DenButton>
         </div>
         {items.length === 0 ? (
           <div className="mt-6 rounded-2xl border border-gray-100 bg-white p-8 text-center text-[13px] text-gray-400">No Automations yet. Create one in OpenWork Web or in the desktop app; it will show up here once Den is scheduling it.</div>
